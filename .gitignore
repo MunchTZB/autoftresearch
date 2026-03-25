@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# uv
+.python-version
+
+# freqtrade user data (large, machine-specific)
+user_data/data/
+user_data/backtest_results/
+user_data/hyperopt_results/
+user_data/plot/
+user_data/logs/
+
+# Keep strategies dir structure but not auto-synced copies
+user_data/strategies/AutoStrategy.py
+user_data/strategies/AutoStrategy.json
+
+# Experiment artifacts
+run.log
+results.tsv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
