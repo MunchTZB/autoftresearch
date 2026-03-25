@@ -37,33 +37,46 @@ autoftresearch/
 - **Hyperopt 运行**：以固定 epochs 运行参数优化
 - **回测执行**：用 hyperopt 最优参数进行回测
 - **结果评估**：从回测结果中计算综合评分并输出标准格式
-- **Train/Val 分割**：定义训练期和验证期，防止过拟合
+- **Train/Test 分割**：定义训练集（hyperopt）和测试集（backtest），防止过拟合
 
-关键设计：
+关键设计 — 数据分割：
+
+```
+|<----------- 历史 K 线数据 ----------->|
+|                                       |
+|  训练集 (TRAIN)     |  测试集 (TEST)  |
+|  2022-01 ~ 2024-01  |  2024-01 ~ 2025-01  |
+|                      |                |
+|  hyperopt 在这里     |  backtest 在这里    |
+|  搜索最优参数        |  用最优参数评估策略  |
+```
+
+- **训练集**：hyperopt 用来搜索参数的数据。Agent 不直接看到这段数据上的回测结果。
+- **测试集**：用 hyperopt 找到的最优参数进行 backtest，产生最终评估指标。这是 Agent 决定保留/回滚的唯一依据。
 
 ```python
 # 固定常量
-TRAIN_TIMERANGE = "20220101-20240101"   # 训练期（hyperopt + 回测用）
-VAL_TIMERANGE   = "20240101-20250101"   # 验证期（最终评估用，Agent 看不到训练期结果）
+TRAIN_TIMERANGE = "20220101-20240101"   # 训练集：hyperopt 用此段数据搜索参数
+TEST_TIMERANGE  = "20240101-20250101"   # 测试集：用最优参数在此段数据上 backtest
 HYPEROPT_EPOCHS = 500                    # hyperopt 迭代次数
 PAIRS = ["BTC/USDT", "ETH/USDT", ...]  # 交易对
 STAKE_CURRENCY = "USDT"
 STARTING_BALANCE = 1000
-MIN_TRADES = 20                          # 最低交易次数阈值
+MIN_TRADES = 20                          # 测试集上最低交易次数阈值
 ```
 
 输出格式（与 autoresearch 对齐）：
 
 ```
 ---
-val_score:        1.8500
-val_sharpe:       1.92
-val_max_drawdown: -0.1200
-val_profit_pct:   35.20
-val_trade_count:  87
-train_score:      2.1000
-hyperopt_epochs:  500
-total_seconds:    423.5
+test_score:        1.8500
+test_sharpe:       1.92
+test_max_drawdown: -0.1200
+test_profit_pct:   35.20
+test_trade_count:  87
+hyperopt_epochs:   500
+hyperopt_best_loss: -2.1000
+total_seconds:     423.5
 ```
 
 ### 2.2 `strategy.py`（Agent 唯一修改的文件）
@@ -106,18 +119,25 @@ LOOP FOREVER:
   3. 修改 strategy.py
   4. git commit
   5. 运行：uv run prepare.py evaluate > run.log 2>&1
-     → prepare.py 内部流程：
-       a. 同步 strategy.py → user_data/strategies/
-       b. 运行 hyperopt（固定 epochs）→ 最优参数
-       c. 用最优参数在训练期回测
-       d. 用最优参数在验证期回测
-       e. 输出综合评分
-  6. 解析结果：grep "^val_score:" run.log
-  7. 如果 val_score 改善 → 保留 commit，记录到 results.tsv
-     如果 val_score 退步 → git reset，记录 discard 到 results.tsv
+     → prepare.py 内部执行两步：
+       STEP 1 — Hyperopt（训练集）
+         在 TRAIN_TIMERANGE 上运行 hyperopt，搜索策略参数的最优值。
+         产出：一组最优参数。
+       STEP 2 — Backtest（测试集）
+         将 hyperopt 找到的最优参数应用到策略上，
+         在 TEST_TIMERANGE 上运行 backtest。
+         产出：Sharpe、回撤、收益率、交易次数等指标 → 计算 test_score。
+  6. 解析结果：grep "^test_score:" run.log
+  7. 如果 test_score 改善 → 保留 commit，记录到 results.tsv
+     如果 test_score 退步 → git reset，记录 discard 到 results.tsv
      如果崩溃 → 尝试修复或跳过，记录 crash
   8. 回到 1
 ```
+
+为什么这样分两步：
+- Hyperopt 在训练集上搜索参数，相当于"学习"。
+- Backtest 在测试集上评估，相当于"考试"。
+- Agent 只看到"考试成绩"(test_score) 来决定策略好坏，避免参数过拟合训练集。
 
 ---
 
@@ -144,10 +164,10 @@ def compute_score(backtest_results):
 
 ### 4.2 过拟合防护
 
-- **Train/Val 时间分割**：hyperopt 和训练期回测用 TRAIN_TIMERANGE，最终评估用 VAL_TIMERANGE
-- **Agent 只看到 val_score**：train_score 记录但不作为决策依据
-- **交易次数阈值**：低于 MIN_TRADES 的策略直接判负
-- **可选**：保留一个 holdout period，定期人工检查
+- **Train/Test 时间分割**：hyperopt 仅使用 TRAIN_TIMERANGE 数据搜索参数，最终评估仅在 TEST_TIMERANGE 上进行 backtest
+- **Agent 只看到 test_score**：hyperopt 内部的 loss 不暴露给 Agent 决策
+- **交易次数阈值**：测试集上低于 MIN_TRADES 的策略直接判负
+- **可选**：保留一个 holdout period（如 2025-01 ~ 2025-06），Agent 完全无法触及，人工定期检查
 
 ---
 
@@ -160,7 +180,7 @@ def compute_score(backtest_results):
 | Agent 角色 | 架构师 + 调参师 | 仅架构师（调参交给 hyperopt） |
 | 时间预算 | 固定 5 分钟 | hyperopt epochs 固定（时间因机器而异） |
 | 评估指标 | val_bpb（单一，越低越好） | 综合评分（Sharpe×收益×回撤，越高越好） |
-| 过拟合防护 | 验证集 | Train/Val 时间分割 |
+| 过拟合防护 | 验证集 | Train/Test 时间分割（hyperopt 训练集 + backtest 测试集） |
 | 每晚实验数 | ~100 | ~20-50（hyperopt 更耗时） |
 | 运行环境 | 单 GPU | 本地机器（CPU 密集） |
 
@@ -237,7 +257,7 @@ analysis = [
 - [ ] 实现 `prepare.py` 中的 hyperopt 调用
 - [ ] 实现 `prepare.py` 中的 backtest 调用和结果解析
 - [ ] 实现综合评分函数 `compute_score`
-- [ ] 实现 Train/Val 时间分割
+- [ ] 实现 Train/Test 时间分割（hyperopt 用训练集，backtest 用测试集）
 - [ ] 实现标准输出格式（与 autoresearch 对齐）
 
 ### Phase 3：Agent 指令
